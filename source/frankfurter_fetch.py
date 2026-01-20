@@ -26,7 +26,6 @@ def _daterange_year_chunks(start: date, end: date) -> Iterable[tuple[date, date]
         yield cur, nxt
         cur = nxt + timedelta(days=1)
 
-
 def _call_timeseries(start: date, end: date, series: FXSeries) -> dict:
     """
     Frankfurter time series endpoint uses /YYYY-MM-DD..YYYY-MM-DD :contentReference[oaicite:4]{index=4}
@@ -46,9 +45,31 @@ def _call_timeseries(start: date, end: date, series: FXSeries) -> dict:
     r2.raise_for_status()
     return r2.json()
 
+def _call_latest(series: FXSeries) -> dict:
+    """
+    Fetch latest available (working-day) rate from Frankfurter.
+    Tries legacy from/to first, then base/symbols fallback.
+    """
+    url = f"{FRANKFURTER_BASE}/latest"
+
+    params_primary = {"from": series.base, "to": series.quote}
+    r = requests.get(url, params=params_primary, timeout=30)
+    if r.ok:
+        return r.json()
+
+    params_fallback = {"base": series.base, "symbols": series.quote}
+    r2 = requests.get(url, params=params_fallback, timeout=30)
+    r2.raise_for_status()
+    return r2.json()
+
+
+def latest_available_date(series: FXSeries) -> date:
+    payload = _call_latest(series)
+    # Frankfurter returns a "date" field like "YYYY-MM-DD"
+    return pd.to_datetime(payload["date"]).date()
 
 def fetch_usdzar_daily(start: date, end: Optional[date] = None) -> pd.DataFrame:
-    end = end or date.today()
+    end = end or latest_available_date(series)
     series = FXSeries("USD", "ZAR")
 
     frames = []
@@ -81,18 +102,22 @@ def load_series_csv(path: Path) -> pd.DataFrame:
 
 
 def update_local_series(path: Path, start_if_missing: date) -> pd.DataFrame:
+    series = FXSeries("USD", "ZAR")
+    latest = latest_available_date(series)  # latest working-day in Frankfurter
+
     if path.exists():
         df = load_series_csv(path)
         last_date = df.index.max().date()
-        # fetch from the day after last available
+
         new_start = last_date + timedelta(days=1)
-        if new_start <= date.today():
-            df_new = fetch_usdzar_daily(new_start, date.today())
+        if new_start <= latest:
+            df_new = fetch_usdzar_daily(new_start, latest)
             df = pd.concat([df, df_new]).sort_index().drop_duplicates()
             save_series_csv(df, path)
+
         return df
 
-    df = fetch_usdzar_daily(start_if_missing, date.today())
+    df = fetch_usdzar_daily(start_if_missing, latest)
     save_series_csv(df, path)
     return df
 

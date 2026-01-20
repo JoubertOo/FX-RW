@@ -4,26 +4,22 @@ import pandas as pd
 import numpy as np
 import streamlit as st
 from pathlib import Path
+from datetime import date
 
-# ---- imports from your package ----
-# Requires: source/__init__.py exists
 from source.rw import rw_forecast_table, rw_past_table  # noqa: E402
+from source.frankfurter_fetch import update_local_series
 
 
 st.set_page_config(page_title="USD/ZAR Random Walk", layout="wide")
 st.title("USD/ZAR Random Walk (Normal or Bootstrap)")
 st.caption("Forecast and backtest tables from a simple RW model.")
 
-# -----------------------------
-# Sidebar: Data
-# -----------------------------
 st.sidebar.header("Data")
 
 uploaded = st.sidebar.file_uploader("Upload CSV (date, usd_zar)", type=["csv"])
 default_csv = Path("data") / "usd_zar_daily.csv"
-use_default = st.sidebar.checkbox(
-    "Use default CSV from ./data (if no upload)", value=True
-)
+use_default = st.sidebar.checkbox("Use default CSV from ./data (if no upload)", value=True)
+
 
 @st.cache_data
 def load_series_from_df(df: pd.DataFrame) -> pd.Series:
@@ -34,23 +30,33 @@ def load_series_from_df(df: pd.DataFrame) -> pd.Series:
     df = df.set_index("date").sort_index()
     return df["usd_zar"].astype(float).dropna()
 
-series: pd.Series | None = None
 
-try:
-    if uploaded is not None:
-        df = pd.read_csv(uploaded)
-        series = load_series_from_df(df)
-    elif use_default and default_csv.exists():
-        df = pd.read_csv(default_csv)
-        series = load_series_from_df(df)
-    else:
-        st.info("Upload a CSV or place a default file at ./data/usd_zar_daily.csv")
+def df_to_series(df: pd.DataFrame) -> pd.Series:
+    s = load_series_from_df(df)
+    return s.dropna().sort_index()
+
+
+if "series" not in st.session_state:
+    series: pd.Series | None = None
+    try:
+        if uploaded is not None:
+            df = pd.read_csv(uploaded)
+            series = df_to_series(df)
+            st.session_state["data_source"] = "upload"
+        elif use_default and default_csv.exists():
+            df = pd.read_csv(default_csv)
+            series = df_to_series(df)
+            st.session_state["data_source"] = "default_csv"
+        else:
+            st.info("Upload a CSV or place a default file at ./data/usd_zar_daily.csv")
+            st.stop()
+    except Exception as e:
+        st.error(f"Failed to load data: {e}")
         st.stop()
-except Exception as e:
-    st.error(f"Failed to load data: {e}")
-    st.stop()
 
-assert series is not None
+    st.session_state["series"] = series
+
+series = st.session_state["series"]
 series = series.dropna().sort_index()
 
 last_date = series.index[-1]
@@ -59,9 +65,25 @@ S0 = float(series.iloc[-1])
 st.sidebar.markdown(f"**Latest date in data:** {last_date.date().isoformat()}")
 st.sidebar.markdown(f"**Latest S0:** {S0:.4f}")
 
-# -----------------------------
-# Sidebar: Global model controls
-# -----------------------------
+st.sidebar.subheader("Update data")
+
+if st.sidebar.button("Update data from Frankfurter"):
+    try:
+        df_updated = update_local_series(default_csv, start_if_missing=date(2016, 1, 1))
+        st.session_state["series"] = df_to_series(df_updated.reset_index())
+        series = st.session_state["series"]
+        st.sidebar.success(f"Updated to {series.index[-1].date().isoformat()}")
+    except Exception as e:
+        st.sidebar.error(f"Update failed: {e}")
+
+df_download = series.rename("usd_zar").reset_index().rename(columns={"index": "date"})
+st.sidebar.download_button(
+    "Download updated CSV",
+    data=df_download.to_csv(index=False).encode("utf-8"),
+    file_name="usd_zar_daily_updated.csv",
+    mime="text/csv",
+)
+
 st.sidebar.header("Model")
 
 method = st.sidebar.selectbox("Method", ["normal", "bootstrap"], index=0)
@@ -89,16 +111,12 @@ K = None
 if use_prob:
     K = st.sidebar.number_input("K", value=float(S0), step=0.1)
 
-# -----------------------------
-# Tabs
-# -----------------------------
 tab1, tab2 = st.tabs(["Forecast", "Past (backtest)"])
 
 with tab1:
     st.subheader("Forecast table")
     st.write("Forecast starts from the latest date/value in the loaded series.")
 
-    # Window slider FOR FORECAST (max 1000, limited by available data)
     max_window_forecast = min(1000, max(0, len(series) - 2))
     if max_window_forecast < 60:
         st.error("Not enough data to support a 60-day window.")
@@ -164,9 +182,8 @@ with tab2:
     start_default = (last_date - pd.offsets.BDay(260)).date()
     start_date = st.date_input("Past start date", value=start_default)
 
-    # Window slider FOR PAST (max 1000, but must be <= returns available up to start_date)
     series_upto = series.loc[:pd.Timestamp(start_date)]
-    n_rets_upto = max(0, len(series_upto) - 1)  # returns = prices - 1
+    n_rets_upto = max(0, len(series_upto) - 1)
 
     max_window_past = min(1000, n_rets_upto)
     if max_window_past < 60:
@@ -184,7 +201,7 @@ with tab2:
         step=10,
         key="window_past",
         help="Number of past daily returns used to calibrate the model (normal μ/σ or bootstrap sampling pool).",
-)
+    )
 
     default_past_targets = [
         (pd.Timestamp(start_date) + pd.offsets.BDay(5)).date().isoformat(),
@@ -228,6 +245,41 @@ with tab2:
             file_name="rw_past_table.csv",
             mime="text/csv",
         )
+
+with st.expander("About the RW models"):
+    st.markdown(r"""
+**What this app does**
+
+This app builds **forecast** and **backtest** tables for USD/ZAR using a **random-walk (RW) model**
+on **daily log-returns**.
+
+**Returns & window**
+- Daily log-return:  $r_t = \ln(S_t) - \ln(S_{t-1}) = \ln(S_t / S_{t-1})$
+- **Lookback window** = number of past trading days of returns used to calibrate the model
+  (estimate parameters or define the bootstrap sampling pool).
+
+**Normal model**
+Assumes log-returns are Normal:
+- $r_t \sim N(\mu,\sigma^2)$
+- $\mu$ is the mean return over the lookback window if **drift** is enabled, otherwise $\mu = 0$
+- $\sigma$ is the standard deviation of returns over the lookback window  
+Then:
+- $\ln S_{h} = \ln(S_0) + \sum_{i=1}^{h} r_{i} \sim N(\ln S_0 + \mu h,\; \sigma^2 h)$
+So:
+- Quantile: $Q_p(S_h)=\exp\!\big(\ln S_0 + \mu h + \sigma\sqrt{h}\,\Phi^{-1}(p)\big)$
+- Tail probability: $P(S_h>K)=1-\Phi\!\left(\dfrac{\ln K-(\ln S_0+\mu h)}{\sigma\sqrt{h}}\right)$
+where $\Phi(\cdot)$ is the **standard normal CDF** and $\Phi^{-1}(\cdot)$ is its inverse (the z-score / ppf).
+
+**Bootstrap model**
+Does not assume Normality. Instead, it resamples past returns (with replacement):
+- We form **shocks**: $\epsilon_t = r_t - \bar r$
+- If **drift** is enabled we add back $\bar r \cdot h$; if not, drift is 0
+- Quantiles/probabilities are estimated from many simulated outcomes.
+
+**Outputs**
+The tables report forecast quantiles (and optional probability $P(S>K)$) and, for the past table,
+the **actual** observed value on the target date.
+""")
 
 st.divider()
 st.caption("Next: add charts (history + fan chart) and a cleaner date-picker UI.")
