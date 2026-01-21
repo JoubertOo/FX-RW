@@ -5,6 +5,7 @@ import numpy as np
 import streamlit as st
 from pathlib import Path
 from datetime import date
+import matplotlib.pyplot as plt
 
 from source.rw import rw_forecast_table, rw_past_table  # noqa: E402
 from source.frankfurter_fetch import update_local_series
@@ -83,6 +84,21 @@ st.sidebar.download_button(
     file_name="usd_zar_daily_updated.csv",
     mime="text/csv",
 )
+
+st.subheader("USD/ZAR history")
+hist_years = st.selectbox("History range", ["6M", "1Y", "5Y", "All"], index=1)
+
+end = series.index[-1]
+if hist_years == "6M":
+    start = end - pd.DateOffset(months=6)
+elif hist_years == "1Y":
+    start = end - pd.DateOffset(years=1)
+elif hist_years == "5Y":
+    start = end - pd.DateOffset(years=5)
+else:
+    start = series.index[0]
+
+st.line_chart(series.loc[start:end])
 
 st.sidebar.header("Model")
 
@@ -174,6 +190,25 @@ with tab1:
             file_name="rw_forecast_table.csv",
             mime="text/csv",
         )
+        ft = tbl.copy()
+        ft["target_date"] = pd.to_datetime(ft["target_date"])
+        ft = ft.sort_values("target_date")
+
+        needed = {"q05", "q25", "q50", "q75", "q95"}
+        if needed.issubset(set(ft.columns)):
+            st.subheader("Forecast fan chart")
+
+            fig, ax = plt.subplots()
+            ax.plot(ft["target_date"], ft["q50"], label="Median")
+            ax.fill_between(ft["target_date"], ft["q05"], ft["q95"], alpha=0.2, label="5–95%")
+            ax.fill_between(ft["target_date"], ft["q25"], ft["q75"], alpha=0.3, label="25–75%")
+            ax.set_xlabel("Date")
+            ax.set_ylabel("USD/ZAR")
+            ax.legend()
+
+            st.pyplot(fig)
+        else:
+            st.info("Fan chart needs quantiles q05, q25, q50, q75, q95. Select these quantiles to display the chart.")
 
 with tab2:
     st.subheader("Past table (backtest)")
@@ -246,7 +281,7 @@ with tab2:
             mime="text/csv",
         )
 
-with st.expander("About the RW models"):
+with st.expander("About the random walk models"):
     st.markdown(r"""
 **What this app does**
 
@@ -281,5 +316,3 @@ The tables report forecast quantiles (and optional probability $P(S>K)$) and, fo
 the **actual** observed value on the target date.
 """)
 
-st.divider()
-st.caption("Next: add charts (history + fan chart) and a cleaner date-picker UI.")
