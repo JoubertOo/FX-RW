@@ -3,4 +3,4 @@ pandas
 matplotlib
 ipykernel
 requests
-streamlit
+streamlit>=1.30
